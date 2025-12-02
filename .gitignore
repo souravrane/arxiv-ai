@@ -1,2 +1,3 @@
 papers/
 orchestration/__pycache__/
+.env
