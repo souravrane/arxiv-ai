@@ -20,7 +20,7 @@ class Config:
     # Database Configuration
     DATABASE_URL: str = os.getenv("DATABASE_URL", "")
     DB_HOST: str = os.getenv("DB_HOST", "localhost")
-    DB_PORT: str = os.getenv("DB_PORT", "5432")
+    DB_PORT: str = os.getenv("DB_PORT", "3306")
     DB_NAME: str = os.getenv("DB_NAME", "")
     DB_USER: str = os.getenv("DB_USER", "")
     DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
@@ -38,36 +38,36 @@ class Config:
     # Search Configuration
     MAX_RESULTS_PER_SEARCH: int = int(os.getenv("MAX_RESULTS_PER_SEARCH", "10"))
     
-    # Database Schema SQL
+    # Database Schema SQL (MySQL compatible)
     CREATE_TABLE_SQL: str = """
     CREATE TABLE IF NOT EXISTS papers (
-        id BIGSERIAL PRIMARY KEY,
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
         arxiv_id VARCHAR(50) UNIQUE NOT NULL,
         entry_id VARCHAR(255) NOT NULL,
         title TEXT NOT NULL,
-        authors JSONB NOT NULL,
+        authors JSON NOT NULL,
         summary TEXT,
-        published TIMESTAMP,
-        updated TIMESTAMP,
-        categories JSONB,
+        published TIMESTAMP NULL,
+        updated TIMESTAMP NULL,
+        categories JSON,
         primary_category VARCHAR(50),
         pdf_url VARCHAR(500),
         doi VARCHAR(255),
         journal_ref VARCHAR(255),
-        raw_text TEXT,
-        sections JSONB,
-        references JSONB,
+        raw_text MEDIUMTEXT,
+        sections JSON,
+        `references` JSON,
         parser_used VARCHAR(50),
-        parser_metadata JSONB,
+        parser_metadata JSON,
         pdf_processed BOOLEAN DEFAULT FALSE,
-        date_processed TIMESTAMP,
+        date_processed TIMESTAMP NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        modified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        modified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     );
 
-    CREATE INDEX IF NOT EXISTS idx_arxiv_id ON papers(arxiv_id);
-    CREATE INDEX IF NOT EXISTS idx_pdf_processed ON papers(pdf_processed);
-    CREATE INDEX IF NOT EXISTS idx_created_at ON papers(created_at);
+    CREATE INDEX idx_arxiv_id ON papers(arxiv_id);
+    CREATE INDEX idx_pdf_processed ON papers(pdf_processed);
+    CREATE INDEX idx_created_at ON papers(created_at);
     """
     
     @classmethod

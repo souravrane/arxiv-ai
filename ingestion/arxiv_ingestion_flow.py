@@ -1,48 +1,62 @@
 """
-arXiv AI Paper Ingestion Flow using Prefect, PostgreSQL, and Docling
+arXiv AI Paper Ingestion Flow using Prefect, MySQL, and Docling
 
 This flow continuously retrieves papers from arXiv API related to artificial intelligence,
-parses PDFs using docling, and stores all paper data in PostgreSQL database.
+parses PDFs using docling, and stores all paper data in MySQL database.
 """
 
 import json
+import tempfile
 import time
-from datetime import datetime
-from io import BytesIO
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import arxiv
-import psycopg2
+import mysql.connector
 from docling.document_converter import DocumentConverter
 from prefect import flow, task
 from prefect import get_run_logger
 
-from ingestion.config import config
+try:
+    from .config import config
+except ImportError:
+    # Handle case when running as a script
+    from config import config
 
 
 def get_db_connection():
     """
-    Create and return a PostgreSQL database connection.
+    Create and return a MySQL database connection.
     Reads connection details from configuration.
     
     Returns:
-        psycopg2.connection: Database connection object
+        mysql.connector.connection: Database connection object
         
     Raises:
         Exception: If connection cannot be established
     """
-    # Try DATABASE_URL first
+    # MySQL connector doesn't support DATABASE_URL directly, so parse it if provided
     if config.DATABASE_URL:
-        return psycopg2.connect(config.DATABASE_URL)
-    
-    # Fallback to individual environment variables
-    db_config = {
-        "host": config.DB_HOST,
-        "port": config.DB_PORT,
-        "database": config.DB_NAME,
-        "user": config.DB_USER,
-        "password": config.DB_PASSWORD,
-    }
+        # Parse DATABASE_URL format: mysql://user:password@host:port/database
+        parsed = urlparse(config.DATABASE_URL)
+        db_config = {
+            "host": parsed.hostname or config.DB_HOST,
+            "port": int(parsed.port) if parsed.port else int(config.DB_PORT),
+            "database": parsed.path.lstrip('/') if parsed.path else config.DB_NAME,
+            "user": parsed.username or config.DB_USER,
+            "password": parsed.password or config.DB_PASSWORD,
+        }
+    else:
+        # Fallback to individual environment variables
+        db_config = {
+            "host": config.DB_HOST,
+            "port": int(config.DB_PORT),
+            "database": config.DB_NAME,
+            "user": config.DB_USER,
+            "password": config.DB_PASSWORD,
+        }
     
     if not db_config["database"] or not db_config["user"]:
         raise ValueError(
@@ -50,7 +64,7 @@ def get_db_connection():
             "DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD"
         )
     
-    return psycopg2.connect(**db_config)
+    return mysql.connector.connect(**db_config)
 
 
 @task(name="initialize_database_schema")
@@ -62,7 +76,53 @@ def initialize_database_schema():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute(config.CREATE_TABLE_SQL)
+        
+        # Execute the full SQL (table + indexes)
+        # MySQL doesn't support IF NOT EXISTS for CREATE INDEX, so we'll catch those errors
+        sql_statements = [s.strip() for s in config.CREATE_TABLE_SQL.split(';') if s.strip()]
+        
+        for sql in sql_statements:
+            try:
+                cur.execute(sql)
+            except mysql.connector.Error as e:
+                # Ignore errors for indexes that already exist (error code 1061)
+                # Also ignore table already exists (error code 1050)
+                if e.errno == 1061:  # Duplicate key name
+                    logger.debug(f"Index already exists, skipping")
+                elif e.errno == 1050:  # Table already exists
+                    logger.debug(f"Table already exists, skipping")
+                else:
+                    # Re-raise other errors
+                    raise
+        
+        # Check if table exists and alter raw_text column if needed
+        # This migration ensures existing tables are updated to support larger documents
+        try:
+            cur.execute("""
+                SELECT COLUMN_TYPE 
+                FROM INFORMATION_SCHEMA.COLUMNS 
+                WHERE TABLE_SCHEMA = DATABASE() 
+                AND TABLE_NAME = 'papers' 
+                AND COLUMN_NAME = 'raw_text'
+            """)
+            result = cur.fetchone()
+            if result:
+                column_type = result[0].upper()
+                logger.debug(f"Current raw_text column type: {column_type}")
+                # Check if it's TEXT (not MEDIUMTEXT or LONGTEXT)
+                if 'TEXT' in column_type and 'MEDIUMTEXT' not in column_type and 'LONGTEXT' not in column_type:
+                    logger.info("Altering raw_text column from TEXT to MEDIUMTEXT to support larger documents...")
+                    cur.execute("ALTER TABLE papers MODIFY COLUMN raw_text MEDIUMTEXT")
+                    conn.commit()
+                    logger.info("✓ Successfully altered raw_text column to MEDIUMTEXT")
+                else:
+                    logger.debug(f"raw_text column is already {column_type}, no migration needed")
+            else:
+                logger.debug("raw_text column not found (table may not exist yet)")
+        except mysql.connector.Error as e:
+            logger.warning(f"Could not check/alter raw_text column: {e}")
+            # Don't fail the whole initialization if migration check fails
+        
         conn.commit()
         cur.close()
         conn.close()
@@ -119,8 +179,9 @@ def check_paper_exists(arxiv_id: str) -> bool:
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("SELECT EXISTS(SELECT 1 FROM papers WHERE arxiv_id = %s)", (arxiv_id,))
-        exists = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM papers WHERE arxiv_id = %s", (arxiv_id,))
+        result = cur.fetchone()
+        exists = result[0] > 0 if result else False
         cur.close()
         conn.close()
         return exists
@@ -172,13 +233,20 @@ def parse_pdf_with_docling(pdf_bytes: bytes) -> Tuple[Optional[str], Optional[Di
         Returns None values if parsing fails
     """
     logger = get_run_logger()
+    # Create a temporary file to store PDF bytes since docling requires a file path
+    temp_file_path = None
     try:
         logger.info("Initializing docling converter...")
         converter = DocumentConverter()
         
+        # Write PDF bytes to temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
+            temp_file.write(pdf_bytes)
+            temp_file_path = temp_file.name
+        
         logger.info("Parsing PDF with docling...")
-        # Convert PDF bytes to document
-        doc = converter.convert(BytesIO(pdf_bytes))
+        # Convert PDF file to document (docling requires a file path, not BytesIO)
+        doc = converter.convert(temp_file_path)
         
         # Extract raw text - try multiple methods
         raw_text = None
@@ -234,7 +302,7 @@ def parse_pdf_with_docling(pdf_bytes: bytes) -> Tuple[Optional[str], Optional[Di
         # Create parser metadata
         parser_metadata = {
             "parser_version": "docling",
-            "parsing_timestamp": datetime.utcnow().isoformat(),
+            "parsing_timestamp": datetime.now(timezone.utc).isoformat(),
             "pdf_size_bytes": len(pdf_bytes),
             "raw_text_length": len(raw_text) if raw_text else 0,
             "num_sections": len(sections) if sections else 0,
@@ -250,6 +318,14 @@ def parse_pdf_with_docling(pdf_bytes: bytes) -> Tuple[Optional[str], Optional[Di
         import traceback
         logger.error(traceback.format_exc())
         return None, None, None, None
+    finally:
+        # Clean up temporary file
+        if temp_file_path and Path(temp_file_path).exists():
+            try:
+                Path(temp_file_path).unlink()
+                logger.debug(f"Cleaned up temporary file: {temp_file_path}")
+            except Exception as e:
+                logger.warning(f"Failed to delete temporary file {temp_file_path}: {e}")
 
 
 @task(name="store_paper_in_db")
@@ -262,8 +338,8 @@ def store_paper_in_db(
     pdf_processed: bool
 ) -> bool:
     """
-    Store paper data in PostgreSQL database.
-    Uses INSERT ... ON CONFLICT for upsert functionality.
+    Store paper data in MySQL database.
+    Uses INSERT ... ON DUPLICATE KEY UPDATE for upsert functionality.
     
     Args:
         paper: arxiv.Result object
@@ -289,40 +365,40 @@ def store_paper_in_db(
         references_json = json.dumps(references) if references else None
         parser_metadata_json = json.dumps(parser_metadata) if parser_metadata else None
         
-        date_processed = datetime.utcnow() if pdf_processed else None
+        date_processed = datetime.now(timezone.utc) if pdf_processed else None
         
-        # Upsert query
+        # Upsert query (MySQL syntax)
         upsert_sql = """
         INSERT INTO papers (
             arxiv_id, entry_id, title, authors, summary, published, updated,
             categories, primary_category, pdf_url, doi, journal_ref,
-            raw_text, sections, references, parser_used, parser_metadata,
+            raw_text, sections, `references`, parser_used, parser_metadata,
             pdf_processed, date_processed, created_at, modified_at
         ) VALUES (
-            %s, %s, %s, %s::jsonb, %s, %s, %s,
-            %s::jsonb, %s, %s, %s, %s,
-            %s, %s::jsonb, %s::jsonb, %s, %s::jsonb,
+            %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s,
             %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
         )
-        ON CONFLICT (arxiv_id) DO UPDATE SET
-            entry_id = EXCLUDED.entry_id,
-            title = EXCLUDED.title,
-            authors = EXCLUDED.authors,
-            summary = EXCLUDED.summary,
-            published = EXCLUDED.published,
-            updated = EXCLUDED.updated,
-            categories = EXCLUDED.categories,
-            primary_category = EXCLUDED.primary_category,
-            pdf_url = EXCLUDED.pdf_url,
-            doi = EXCLUDED.doi,
-            journal_ref = EXCLUDED.journal_ref,
-            raw_text = EXCLUDED.raw_text,
-            sections = EXCLUDED.sections,
-            references = EXCLUDED.references,
-            parser_used = EXCLUDED.parser_used,
-            parser_metadata = EXCLUDED.parser_metadata,
-            pdf_processed = EXCLUDED.pdf_processed,
-            date_processed = EXCLUDED.date_processed,
+        ON DUPLICATE KEY UPDATE
+            entry_id = VALUES(entry_id),
+            title = VALUES(title),
+            authors = VALUES(authors),
+            summary = VALUES(summary),
+            published = VALUES(published),
+            updated = VALUES(updated),
+            categories = VALUES(categories),
+            primary_category = VALUES(primary_category),
+            pdf_url = VALUES(pdf_url),
+            doi = VALUES(doi),
+            journal_ref = VALUES(journal_ref),
+            raw_text = VALUES(raw_text),
+            sections = VALUES(sections),
+            `references` = VALUES(`references`),
+            parser_used = VALUES(parser_used),
+            parser_metadata = VALUES(parser_metadata),
+            pdf_processed = VALUES(pdf_processed),
+            date_processed = VALUES(date_processed),
             modified_at = CURRENT_TIMESTAMP
         """
         
@@ -366,7 +442,7 @@ def arxiv_ai_paper_ingestion_flow(
     delay_seconds: Optional[int] = None
 ):
     """
-    Main Prefect flow that orchestrates arXiv paper ingestion with PostgreSQL and docling.
+    Main Prefect flow that orchestrates arXiv paper ingestion with MySQL and docling.
     
     This flow:
     1. Validates configuration
@@ -375,7 +451,7 @@ def arxiv_ai_paper_ingestion_flow(
     4. Checks database for existing papers (skip duplicates)
     5. Downloads PDFs temporarily
     6. Parses PDFs with docling
-    7. Stores all data in PostgreSQL
+    7. Stores all data in MySQL
     8. Waits configured seconds before processing next paper
     
     Args:
@@ -385,7 +461,7 @@ def arxiv_ai_paper_ingestion_flow(
                       (uses config.RATE_LIMIT_SECONDS if None)
     """
     logger = get_run_logger()
-    logger.info("Starting arXiv AI Paper Ingestion Flow with PostgreSQL and Docling")
+    logger.info("Starting arXiv AI Paper Ingestion Flow with MySQL and Docling")
     
     # Validate configuration
     try:
