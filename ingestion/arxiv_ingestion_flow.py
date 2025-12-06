@@ -123,6 +123,50 @@ def initialize_database_schema():
             logger.warning(f"Could not check/alter raw_text column: {e}")
             # Don't fail the whole initialization if migration check fails
         
+        # Migration: Add chunked column if it doesn't exist
+        try:
+            cur.execute("""
+                SELECT COLUMN_NAME
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                AND TABLE_NAME = 'papers'
+                AND COLUMN_NAME = 'chunked'
+            """)
+            result = cur.fetchone()
+            if not result:
+                logger.info("Adding chunked column to papers table...")
+                cur.execute("ALTER TABLE papers ADD COLUMN chunked BOOLEAN DEFAULT FALSE")
+                conn.commit()
+                logger.info("✓ Successfully added chunked column")
+            else:
+                logger.debug("chunked column already exists")
+        except mysql.connector.Error as e:
+            logger.warning(f"Could not check/add chunked column: {e}")
+            # Don't fail the whole initialization if migration check fails
+        
+        # Migration: Add chunked index if it doesn't exist
+        try:
+            cur.execute("""
+                SELECT INDEX_NAME
+                FROM INFORMATION_SCHEMA.STATISTICS
+                WHERE TABLE_SCHEMA = DATABASE()
+                AND TABLE_NAME = 'papers'
+                AND INDEX_NAME = 'idx_chunked'
+            """)
+            result = cur.fetchone()
+            if not result:
+                logger.info("Adding idx_chunked index...")
+                cur.execute("CREATE INDEX idx_chunked ON papers(chunked)")
+                conn.commit()
+                logger.info("✓ Successfully added idx_chunked index")
+            else:
+                logger.debug("idx_chunked index already exists")
+        except mysql.connector.Error as e:
+            if e.errno == 1061:  # Duplicate key name
+                logger.debug("idx_chunked index already exists, skipping")
+            else:
+                logger.warning(f"Could not check/add idx_chunked index: {e}")
+        
         conn.commit()
         cur.close()
         conn.close()

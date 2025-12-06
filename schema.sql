@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS papers (
     parser_used VARCHAR(50),
     parser_metadata JSON,
     pdf_processed BOOLEAN DEFAULT FALSE,
+    chunked BOOLEAN DEFAULT FALSE,
     date_processed TIMESTAMP NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     modified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -32,6 +33,7 @@ CREATE TABLE IF NOT EXISTS papers (
 -- These will error if indexes already exist, which is safe to ignore
 CREATE INDEX idx_arxiv_id ON papers(arxiv_id);
 CREATE INDEX idx_pdf_processed ON papers(pdf_processed);
+CREATE INDEX idx_chunked ON papers(chunked);
 CREATE INDEX idx_created_at ON papers(created_at);
 
 -- Example query to get papers ready for chunking/indexing

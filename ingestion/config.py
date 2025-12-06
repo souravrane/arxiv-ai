@@ -38,6 +38,23 @@ class Config:
     # Search Configuration
     MAX_RESULTS_PER_SEARCH: int = int(os.getenv("MAX_RESULTS_PER_SEARCH", "10"))
     
+    # Embedding Configuration
+    EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+    EMBEDDING_PROVIDER: str = os.getenv("EMBEDDING_PROVIDER", "sentence-transformers")  # sentence-transformers, openai, cohere, etc.
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+    OPENAI_EMBEDDING_MODEL: str = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+    
+    # Qdrant Configuration
+    QDRANT_HOST: str = os.getenv("QDRANT_HOST", "localhost")
+    QDRANT_PORT: int = int(os.getenv("QDRANT_PORT", "6333"))
+    QDRANT_URL: str = os.getenv("QDRANT_URL", "")  # For cloud Qdrant
+    QDRANT_API_KEY: str = os.getenv("QDRANT_API_KEY", "")  # For cloud Qdrant
+    QDRANT_COLLECTION_NAME: str = os.getenv("QDRANT_COLLECTION_NAME", "paper_chunks")
+    
+    # Chunking Configuration
+    CHUNK_SIZE_TOKENS: int = int(os.getenv("CHUNK_SIZE_TOKENS", "650"))  # Target: 500-800 tokens
+    CHUNK_OVERLAP_TOKENS: int = int(os.getenv("CHUNK_OVERLAP_TOKENS", "125"))  # Target: 100-150 tokens
+    
     # Database Schema SQL (MySQL compatible)
     CREATE_TABLE_SQL: str = """
     CREATE TABLE IF NOT EXISTS papers (
@@ -60,6 +77,7 @@ class Config:
         parser_used VARCHAR(50),
         parser_metadata JSON,
         pdf_processed BOOLEAN DEFAULT FALSE,
+        chunked BOOLEAN DEFAULT FALSE,
         date_processed TIMESTAMP NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         modified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -67,6 +85,7 @@ class Config:
 
     CREATE INDEX idx_arxiv_id ON papers(arxiv_id);
     CREATE INDEX idx_pdf_processed ON papers(pdf_processed);
+    CREATE INDEX idx_chunked ON papers(chunked);
     CREATE INDEX idx_created_at ON papers(created_at);
     """
     
