@@ -8,4 +8,14 @@ qdrant-client>=1.7.0
 sentence-transformers>=2.2.0
 openai>=1.0.0
 tiktoken>=0.5.0
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# Optional LLM provider dependencies (install only if needed)
+# ollama>=0.1.0  # For Ollama provider
+# transformers>=4.30.0  # For HuggingFace provider
+# torch>=2.0.0  # For local HuggingFace models
+# anthropic>=0.18.0  # For Anthropic/Claude provider
 
