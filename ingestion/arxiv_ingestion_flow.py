@@ -52,12 +52,12 @@ def get_db_connection():
         # Fallback to individual environment variables
         db_config = {
             "host": config.DB_HOST,
-            "port": int(config.DB_PORT),
+                "port": int(config.DB_PORT),
             "database": config.DB_NAME,
             "user": config.DB_USER,
             "password": config.DB_PASSWORD,
         }
-    
+        
     if not db_config["database"] or not db_config["user"]:
         raise ValueError(
             "Database configuration missing. Set DATABASE_URL or "
