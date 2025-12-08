@@ -231,10 +231,10 @@ def chunk_paper_text(
     Chunk text into overlapping segments with context header prepended.
     
     Args:
-        context_header: Title and abstract to prepend to each chunk
+        context_header: Title to prepend to each chunk
         body: Main text body to chunk
         chunk_size_tokens: Target chunk size in tokens
-        overlap_tokens: Overlap between chunks in tokens
+        overlap_tokens: Overlap between chunks in tokens (typically 20% of chunk_size_tokens)
         
     Returns:
         List of tuples: (chunk_text, chunk_index)
@@ -493,15 +493,18 @@ def chunk_and_embed_paper(
         sections = paper.get('sections') or {}
         pdf_url = paper.get('pdf_url', '')
         
-        # Create context header
-        context_header = f"{title}\n\n{summary}"
+        # Create context header (only title, no summary)
+        context_header = title
+        
+        # Calculate overlap as 10% of chunk size
+        overlap_tokens = int(config.CHUNK_SIZE_TOKENS * 0.2)
         
         # Chunk the text
         chunks = chunk_paper_text(
             context_header=context_header,
             body=raw_text,
             chunk_size_tokens=config.CHUNK_SIZE_TOKENS,
-            overlap_tokens=config.CHUNK_OVERLAP_TOKENS
+            overlap_tokens=overlap_tokens
         )
         
         if not chunks:
