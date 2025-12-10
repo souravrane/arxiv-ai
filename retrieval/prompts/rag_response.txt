@@ -14,7 +14,7 @@ The following chunks have been retrieved from research papers:
 
 1. **Use only the provided context**: Base your answer entirely on the chunks provided above.
 
-2. **Cite sources**: When referencing information, cite the source paper using the format: [Paper: {paper_title}]({paper_url}) or [Paper {paper_id}]({paper_url})
+2. **Cite sources**: When referencing information, cite the source paper using the format: [Paper: {{paper_title}}]({{paper_url}}) or [Paper {{paper_id}}]({{paper_url}})
 
 3. **Be accurate**: If the context doesn't contain enough information to answer the question, state that clearly.
 
@@ -23,6 +23,12 @@ The following chunks have been retrieved from research papers:
 5. **Maintain academic tone**: Write in a clear, professional manner appropriate for discussing research papers.
 
 6. **Structure your response**: Use clear paragraphs and, if helpful, bullet points or numbered lists.
+
+7. **Provide a summary**: At the end of your response, provide a concise one-paragraph summary that directly answers the user's question.
+
+8. **Identify most relevant paper**: After the summary, clearly state which paper contains the most relevant information, including:
+   - The paper's title/name
+   - The paper's URL (from the chunk metadata)
 
 ## User Question
 

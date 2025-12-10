@@ -10,6 +10,8 @@ Orchestrates the complete RAG flow:
 import time
 from typing import Dict, List, Optional
 
+import tiktoken
+
 from retrieval.services.llm import LLMService
 from retrieval.services.query_simplifier import QuerySimplifier
 from retrieval.services.embedding import EmbeddingService
@@ -68,7 +70,7 @@ Answer:"""
     def query(
         self,
         query: str,
-        top_k: int = 10,
+        top_k: Optional[int] = None,
         simplify_query: bool = True,
         filter_categories: Optional[List[str]] = None,
         filter_paper_id: Optional[str] = None,
@@ -108,6 +110,10 @@ Answer:"""
             all_chunks = []
             seen_chunk_ids = set()
             
+            # Use default top_k if not provided
+            effective_top_k = top_k or settings.DEFAULT_TOP_K
+            logger.info(f"Using top_k: {effective_top_k}")
+            
             for simplified_query in simplified_queries:
                 # Generate embedding
                 query_embedding = self.embedding_service.generate_embedding(simplified_query)
@@ -122,7 +128,7 @@ Answer:"""
                 # Search Qdrant
                 search_results = self.qdrant_service.search(
                     query_vector=query_embedding,
-                    top_k=top_k,
+                    top_k=effective_top_k,
                     filter_conditions=filter_conditions if filter_conditions else None,
                 )
                 
@@ -148,12 +154,30 @@ Answer:"""
                         "chunks_retrieved": 0,
                         "processing_time": time.time() - start_time,
                         "llm_provider": settings.LLM_PROVIDER,
+                        "top_k": effective_top_k,
                     }
                 }
             
             # Step 3: Format context and generate response
             logger.info("Generating response...")
-            context_chunks = self._format_chunks_for_context(all_chunks)
+            
+            # Calculate token budget for context
+            # Reserve tokens for: prompt template, query, and response
+            max_response_tokens = max_tokens or settings.LLM_MAX_TOKENS
+            prompt_template_tokens = 500  # Approximate tokens for prompt template
+            query_tokens = self._count_tokens(query)
+            response_reserve = int(max_response_tokens * 0.3)  # Reserve 30% for response
+            
+            # Available tokens for context chunks
+            context_token_budget = max_response_tokens - prompt_template_tokens - query_tokens - response_reserve
+            context_token_budget = max(context_token_budget, 500)  # Minimum 500 tokens for context
+            
+            logger.info(f"Token budget: {max_response_tokens} total, {context_token_budget} for context")
+            
+            context_chunks = self._format_chunks_for_context(
+                all_chunks, 
+                max_tokens=context_token_budget
+            )
             
             # Format prompt
             if "{context_chunks}" in self.response_prompt_template and "{query}" in self.response_prompt_template:
@@ -164,12 +188,16 @@ Answer:"""
             else:
                 prompt = f"{self.response_prompt_template}\n\nContext:\n{context_chunks}\n\nQuestion: {query}"
             
+            logger.info(f"Prompt: {prompt}")
+            logger.info(f"context_chunks: {context_chunks}")
+
+            response = "This is a test response."
             # Generate response
-            response = self.llm_service.generate(
-                prompt=prompt,
-                temperature=temperature or settings.LLM_TEMPERATURE,
-                max_tokens=max_tokens or settings.LLM_MAX_TOKENS,
-            )
+            # response = self.llm_service.generate(
+            #     prompt=prompt,
+            #     temperature=temperature or settings.LLM_TEMPERATURE,
+            #     max_tokens=max_tokens or settings.LLM_MAX_TOKENS,
+            # )
             
             # Format sources
             sources = self._format_sources(all_chunks)
@@ -197,34 +225,117 @@ Answer:"""
             logger.error(traceback.format_exc())
             raise
 
-    def _format_chunks_for_context(self, chunks: List[dict]) -> str:
+    def _count_tokens(self, text: str) -> int:
         """
-        Format chunks for LLM context.
+        Count tokens in text using tiktoken.
         
         Args:
-            chunks: List of chunk dictionaries from Qdrant
+            text: Text to count tokens for
+            
+        Returns:
+            Number of tokens
+        """
+        try:
+            # Use cl100k_base encoding (used by GPT models and DeepSeek)
+            encoding = tiktoken.get_encoding("cl100k_base")
+            return len(encoding.encode(text))
+        except Exception as e:
+            logger.warning(f"Error counting tokens: {e}, using character-based estimate")
+            # Fallback: rough estimate (1 token ≈ 4 characters)
+            return len(text) // 4
+
+    def _format_chunks_for_context(self, chunks: List[dict], max_tokens: Optional[int] = None) -> str:
+        """
+        Format chunks for LLM context with text sanitization and token budget management.
+        
+        Uses re-ranking and filtering strategy:
+        - Sorts chunks by relevance score (highest first)
+        - Selects chunks that fit within token budget
+        - Preserves most relevant information
+        
+        Args:
+            chunks: List of chunk dictionaries from Qdrant (should be pre-sorted by score)
+            max_tokens: Maximum tokens allowed for context (None = no limit)
             
         Returns:
             Formatted context string
         """
-        formatted_chunks = []
+        # Ensure chunks are sorted by relevance score (highest first)
+        sorted_chunks = sorted(chunks, key=lambda x: x.get("score", 0), reverse=True)
         
-        for idx, chunk in enumerate(chunks, 1):
+        formatted_chunks = []
+        current_tokens = 0
+        formatting_overhead = 100  # Approximate tokens for formatting per chunk
+        
+        if max_tokens:
+            available_tokens = max_tokens - formatting_overhead
+            logger.info(f"Token budget for chunks: {available_tokens} tokens")
+        else:
+            available_tokens = None
+            logger.info("No token budget limit, using all chunks")
+        
+        for idx, chunk in enumerate(sorted_chunks, 1):
             payload = chunk.get("payload", {})
             chunk_text = payload.get("chunk_text", "")
             paper_id = payload.get("paper_id", "unknown")
             paper_url = payload.get("paper_url", "")
             score = chunk.get("score", 0)
             
+            # Text is already sanitized when stored in database, so no need to sanitize again
+            # Only truncate if too long (safety measure for token budget)
+            if chunk_text:
+                max_chunk_length = 10000  # Adjust as needed
+                if len(chunk_text) > max_chunk_length:
+                    chunk_text = chunk_text[:max_chunk_length] + "... [truncated]"
+            
+            # Extract paper title from chunk_text (it's in the context header at the start)
+            # The chunk_text format is: "{title}\n\n{chunk_body}" (summary removed)
+            paper_title = "Unknown"
+            if chunk_text:
+                lines = chunk_text.split('\n')
+                if lines:
+                    # Title is typically the first non-empty line
+                    for line in lines:
+                        if line.strip():
+                            paper_title = line.strip()
+                            break
+            
+            # Build formatted chunk
             formatted_chunk = f"[Chunk {idx}] (Relevance: {score:.3f})\n"
+            formatted_chunk += f"Paper Title: {paper_title}\n"
             formatted_chunk += f"Paper ID: {paper_id}\n"
             if paper_url:
-                formatted_chunk += f"URL: {paper_url}\n"
+                formatted_chunk += f"Paper URL: {paper_url}\n"
             formatted_chunk += f"Content:\n{chunk_text}\n"
+            
+            # Check token budget if limit is set
+            if max_tokens:
+                # Estimate tokens for this formatted chunk
+                chunk_tokens = self._count_tokens(formatted_chunk)
+                
+                # Check if adding this chunk would exceed budget
+                if current_tokens + chunk_tokens > available_tokens:
+                    logger.info(
+                        f"Token budget reached at chunk {idx}/{len(sorted_chunks)}. "
+                        f"Using {len(formatted_chunks)} chunks ({current_tokens} tokens)"
+                    )
+                    break
+                
+                current_tokens += chunk_tokens
             
             formatted_chunks.append(formatted_chunk)
         
-        return "\n---\n\n".join(formatted_chunks)
+        if not formatted_chunks:
+            logger.warning("No chunks could be formatted within token budget")
+            return "No relevant chunks available."
+        
+        result = "\n---\n\n".join(formatted_chunks)
+        
+        if max_tokens:
+            final_tokens = self._count_tokens(result)
+            logger.info(f"Formatted {len(formatted_chunks)} chunks using {final_tokens}/{available_tokens} tokens")
+        
+        return result
 
     def _format_sources(self, chunks: List[dict]) -> List[dict]:
         """
@@ -246,10 +357,17 @@ Answer:"""
             # Only include each paper once
             if paper_id and paper_id not in seen_paper_ids:
                 seen_paper_ids.add(paper_id)
+                # Convert chunk_id to string if it's an integer
+                chunk_id = payload.get("chunk_id", "")
+                if isinstance(chunk_id, int):
+                    chunk_id = str(chunk_id)
+                elif not isinstance(chunk_id, str):
+                    chunk_id = str(chunk_id) if chunk_id else ""
+                
                 sources.append({
                     "paper_id": paper_id,
                     "paper_url": payload.get("paper_url", ""),
-                    "chunk_id": payload.get("chunk_id", ""),
+                    "chunk_id": chunk_id,
                     "relevance_score": chunk.get("score", 0),
                     "categories": payload.get("categories", []),
                 })

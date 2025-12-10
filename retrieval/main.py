@@ -4,6 +4,11 @@ FastAPI main application
 Entry point for the retrieval API server.
 """
 
+import os
+
+# Suppress tokenizers parallelism warning when using uvicorn reload
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 

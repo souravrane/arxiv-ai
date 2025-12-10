@@ -13,6 +13,7 @@ from retrieval.services.llm_providers.openai_provider import OpenAIProvider
 from retrieval.services.llm_providers.ollama_provider import OllamaProvider
 from retrieval.services.llm_providers.huggingface_provider import HuggingFaceProvider
 from retrieval.services.llm_providers.lmstudio_provider import LMStudioProvider
+from retrieval.services.llm_providers.deepseek_provider import DeepSeekProvider
 
 try:
     from retrieval.services.llm_providers.anthropic_provider import AnthropicProvider
@@ -106,10 +107,25 @@ class LLMService:
                 api_key=settings.ANTHROPIC_API_KEY,
             )
 
+        elif provider == "deepseek":
+            # Use DEEPSEEK_API_KEY if available, otherwise fall back to LLM_API_KEY
+            api_key = settings.DEEPSEEK_API_KEY or settings.LLM_API_KEY
+            if not api_key:
+                raise ValueError(
+                    "DEEPSEEK_API_KEY or LLM_API_KEY must be set for DeepSeek provider. "
+                    "Get your API key from https://platform.deepseek.com/"
+                )
+            base_url = settings.LLM_BASE_URL or None  # None will use default DeepSeek endpoint
+            return DeepSeekProvider(
+                model=self.model,
+                api_key=api_key,
+                base_url=base_url,
+            )
+
         else:
             raise ValueError(
                 f"Unsupported LLM provider: {provider}. "
-                "Supported providers: openai, ollama, huggingface, lmstudio, anthropic"
+                "Supported providers: openai, ollama, huggingface, lmstudio, anthropic, deepseek"
             )
 
     def generate(

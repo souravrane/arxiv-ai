@@ -5,7 +5,7 @@ Loads configuration from environment variables.
 """
 
 import os
-from typing import List
+from typing import List, Optional
 
 from dotenv import load_dotenv
 
@@ -66,9 +66,9 @@ class Settings(BaseSettings):
     MAX_TOP_K: int = int(os.getenv("MAX_TOP_K", "100"))
 
     # LLM Configuration
-    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openai")  # openai, ollama, huggingface, lmstudio, anthropic
-    LLM_MODEL: str = os.getenv("LLM_MODEL", "gpt-4")  # Provider-specific model name
-    LLM_BASE_URL: str = os.getenv("LLM_BASE_URL", "")  # For local providers (Ollama, LM Studio)
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "deepseek")  # openai, ollama, huggingface, lmstudio, anthropic, deepseek
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "deepseek-chat")  # Provider-specific model name (gpt-3.5-turbo, gpt-4, deepseek-chat, deepseek-coder, deepseek-r1)
+    LLM_BASE_URL: str = os.getenv("LLM_BASE_URL", "")  # For local providers (Ollama, LM Studio) or custom DeepSeek endpoint
     LLM_API_KEY: str = os.getenv("LLM_API_KEY", "")  # Generic API key (falls back to provider-specific)
     LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "2000"))
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     
     # Anthropic Configuration (optional)
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+    
+    # DeepSeek Configuration (optional, falls back to LLM_API_KEY)
+    DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
 
     # RAG Configuration
     QUERY_SIMPLIFICATION_ENABLED: bool = os.getenv("QUERY_SIMPLIFICATION_ENABLED", "true").lower() == "true"

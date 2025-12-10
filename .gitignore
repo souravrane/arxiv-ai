@@ -48,6 +48,9 @@ logs/
 qdrant_storage/
 chroma_db/
 
+# PDF Storage
+pdfs/
+
 # Temporary files
 *.tmp
 *.temp

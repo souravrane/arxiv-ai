@@ -31,8 +31,8 @@ class RAGRequest(BaseModel):
     """RAG query request model"""
 
     query: str = Field(..., description="User query/question")
-    top_k: int = Field(
-        default=10,
+    top_k: Optional[int] = Field(
+        default=None,
         ge=1,
         le=100,
         description="Number of chunks to retrieve"

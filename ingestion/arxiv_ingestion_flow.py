@@ -6,6 +6,7 @@ parses PDFs using docling, and stores all paper data in MySQL database.
 """
 
 import json
+import re
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -24,6 +25,36 @@ try:
 except ImportError:
     # Handle case when running as a script
     from config import config
+
+
+def sanitize_text(text: Optional[str]) -> Optional[str]:
+    """
+    Sanitize text by removing control characters, normalizing whitespace,
+    and ensuring valid UTF-8 encoding.
+    
+    Args:
+        text: Text to sanitize (can be None)
+        
+    Returns:
+        Sanitized text or None if input was None
+    """
+    if not text:
+        return text
+    
+    # Remove control characters except newlines and tabs
+    text = re.sub(r'[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f-\x9f]', '', text)
+    
+    # Normalize whitespace (keep newlines but clean up excessive spaces)
+    text = re.sub(r'[ \t]+', ' ', text)  # Multiple spaces/tabs to single space
+    text = re.sub(r'\n{3,}', '\n\n', text)  # Max 2 consecutive newlines
+    
+    # Ensure UTF-8 encoding (remove invalid characters)
+    text = text.encode('utf-8', errors='ignore').decode('utf-8')
+    
+    # Remove leading/trailing whitespace
+    text = text.strip()
+    
+    return text
 
 
 def get_db_connection():
@@ -235,62 +266,97 @@ def check_paper_exists(arxiv_id: str) -> bool:
         return False
 
 
-@task(name="download_pdf_temp")
-def download_pdf_temp(paper: arxiv.Result) -> Optional[bytes]:
+@task(name="download_pdf")
+def download_pdf(paper: arxiv.Result) -> Optional[str]:
     """
-    Download PDF from arXiv temporarily (in-memory) for parsing.
+    Download PDF from arXiv and save to storage folder.
     
     Args:
         paper: arxiv.Result object
         
     Returns:
-        PDF content as bytes, or None if download fails
+        Path to downloaded PDF file, or None if download fails
     """
     logger = get_run_logger()
     try:
         import requests
+        
         paper_id = paper.entry_id.split("/")[-1]
         logger.info(f"Downloading PDF for {paper_id}: {paper.title[:50]}...")
+        
+        # Create PDF storage directory if it doesn't exist
+        pdf_dir = Path(config.PDF_STORAGE_DIR)
+        pdf_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Generate filename: arxiv_id.pdf
+        pdf_filename = f"{paper_id}.pdf"
+        pdf_path = pdf_dir / pdf_filename
+        
+        # Check if PDF already exists
+        if pdf_path.exists():
+            logger.info(f"PDF already exists at {pdf_path}, skipping download")
+            return str(pdf_path)
         
         # Download PDF from arXiv
         response = requests.get(paper.pdf_url, timeout=30)
         response.raise_for_status()
         
-        pdf_bytes = response.content
-        logger.info(f"Successfully downloaded PDF ({len(pdf_bytes)} bytes) for {paper_id}")
-        return pdf_bytes
+        # Save PDF to file
+        with open(pdf_path, 'wb') as f:
+            f.write(response.content)
+        
+        file_size = pdf_path.stat().st_size
+        logger.info(f"Successfully downloaded PDF to {pdf_path} ({file_size} bytes)")
+        return str(pdf_path)
+        
     except Exception as e:
         logger.error(f"Error downloading PDF for {paper.entry_id}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return None
 
 
 @task(name="parse_pdf_with_docling")
-def parse_pdf_with_docling(pdf_bytes: bytes) -> Tuple[Optional[str], Optional[Dict], Optional[Dict], Optional[Dict]]:
+def parse_pdf_with_docling(pdf_path: str) -> Tuple[Optional[str], Optional[Dict], Optional[Dict], Optional[Dict]]:
     """
     Parse PDF using docling to extract raw text, sections, and references.
     
     Args:
-        pdf_bytes: PDF content as bytes
+        pdf_path: Path to PDF file
         
     Returns:
         Tuple of (raw_text, sections_json, references_json, parser_metadata)
         Returns None values if parsing fails
     """
     logger = get_run_logger()
-    # Create a temporary file to store PDF bytes since docling requires a file path
-    temp_file_path = None
     try:
+        # Verify PDF file exists
+        pdf_file = Path(pdf_path)
+        if not pdf_file.exists():
+            logger.error(f"PDF file not found: {pdf_path}")
+            return None, None, None, None
+        
+        logger.info(f"Parsing PDF from {pdf_path}...")
         logger.info("Initializing docling converter...")
-        converter = DocumentConverter()
+        # Configure converter to extract structured content (sections, references)
+        # Note: Some docling versions may require specific configuration
+        try:
+            # Try with default configuration first
+            converter = DocumentConverter()
+        except Exception as e:
+            logger.warning(f"Error initializing DocumentConverter with defaults: {e}")
+            # Fallback: try with minimal configuration
+            converter = DocumentConverter()
         
-        # Write PDF bytes to temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
-            temp_file.write(pdf_bytes)
-            temp_file_path = temp_file.name
+        logger.info("Converting PDF with docling...")
+        # Convert PDF file to document (docling requires a file path)
+        doc = converter.convert(str(pdf_path))
         
-        logger.info("Parsing PDF with docling...")
-        # Convert PDF file to document (docling requires a file path, not BytesIO)
-        doc = converter.convert(temp_file_path)
+        # Log document structure for debugging
+        logger.debug(f"Document type: {type(doc)}")
+        if hasattr(doc, 'document'):
+            logger.debug(f"Document.document type: {type(doc.document)}")
+            logger.debug(f"Document.document attributes: {dir(doc.document)[:20]}")
         
         # Extract raw text - try multiple methods
         raw_text = None
@@ -307,47 +373,161 @@ def parse_pdf_with_docling(pdf_bytes: bytes) -> Tuple[Optional[str], Optional[Di
             logger.warning(f"Could not extract raw text using standard methods: {e}")
             raw_text = str(doc) if doc else None
         
-        # Extract sections - try to get structured document
+        # Extract sections - try multiple methods to get structured document
         sections = []
         doc_dict = {}
         try:
+            # Method 1: Try export_to_dict if available
             if hasattr(doc, 'document') and hasattr(doc.document, 'export_to_dict'):
-                doc_dict = doc.document.export_to_dict()
-            elif hasattr(doc, 'export_to_dict'):
-                doc_dict = doc.export_to_dict()
+                try:
+                    doc_dict = doc.document.export_to_dict()
+                    logger.debug("Got doc_dict from doc.document.export_to_dict()")
+                except Exception as e:
+                    logger.debug(f"export_to_dict() failed: {e}")
             
+            # Method 2: Try direct export_to_dict on doc
+            if not doc_dict and hasattr(doc, 'export_to_dict'):
+                try:
+                    doc_dict = doc.export_to_dict()
+                    logger.debug("Got doc_dict from doc.export_to_dict()")
+                except Exception as e:
+                    logger.debug(f"doc.export_to_dict() failed: {e}")
+            
+            # Method 3: Try accessing document structure directly
+            if not doc_dict and hasattr(doc, 'document'):
+                try:
+                    # Try to convert document to dict manually
+                    doc_obj = doc.document
+                    if hasattr(doc_obj, '__dict__'):
+                        doc_dict = doc_obj.__dict__
+                        logger.debug("Got doc_dict from doc.document.__dict__")
+                except Exception as e:
+                    logger.debug(f"Accessing __dict__ failed: {e}")
+            
+            # Extract sections from doc_dict
             if isinstance(doc_dict, dict):
-                # Extract sections from document structure
+                # Try various paths for sections
                 sections = doc_dict.get('sections', [])
+                if not sections:
+                    sections = doc_dict.get('body', {}).get('sections', []) if isinstance(doc_dict.get('body'), dict) else []
                 if not sections and 'content' in doc_dict:
-                    # Try to extract from content
+                    # Extract sections from content array
                     content = doc_dict.get('content', [])
-                    sections = [item for item in content if isinstance(item, dict) and 'type' in item]
-                elif not sections and 'body' in doc_dict:
-                    # Try body structure
+                    if isinstance(content, list):
+                        sections = [
+                            item for item in content 
+                            if isinstance(item, dict) and (
+                                item.get('type') == 'section' or 
+                                item.get('type') == 'heading' or
+                                'title' in item or
+                                'heading' in item
+                            )
+                        ]
+                if not sections and 'body' in doc_dict:
                     body = doc_dict.get('body', {})
                     if isinstance(body, dict):
                         sections = body.get('sections', [])
+                        if not sections and 'content' in body:
+                            body_content = body.get('content', [])
+                            if isinstance(body_content, list):
+                                sections = [
+                                    item for item in body_content
+                                    if isinstance(item, dict) and (
+                                        item.get('type') == 'section' or
+                                        'title' in item
+                                    )
+                                ]
+            
+            # Method 4: Try accessing sections directly from document object
+            if not sections and hasattr(doc, 'document'):
+                try:
+                    doc_obj = doc.document
+                    if hasattr(doc_obj, 'sections'):
+                        sections = doc_obj.sections
+                        logger.debug(f"Got sections directly from doc.document.sections: {len(sections)}")
+                    elif hasattr(doc_obj, 'body') and hasattr(doc_obj.body, 'sections'):
+                        sections = doc_obj.body.sections
+                        logger.debug(f"Got sections from doc.document.body.sections: {len(sections)}")
+                except Exception as e:
+                    logger.debug(f"Direct section access failed: {e}")
+            
+            # Convert sections to list of dicts if needed
+            if sections and not isinstance(sections, list):
+                sections = [sections] if sections else []
+            
+            # Ensure sections are serializable
+            if sections:
+                sections = [
+                    item if isinstance(item, dict) else {'content': str(item), 'type': 'section'}
+                    for item in sections
+                ]
+            
+            logger.info(f"Extracted {len(sections)} sections")
+            
         except Exception as e:
             logger.warning(f"Could not extract sections: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
         
-        # Extract references - look for citations/references in the document
+        # Extract references - try multiple methods
         references = []
         try:
-            if hasattr(doc, 'document') and hasattr(doc.document, 'references'):
-                references = doc.document.references
-            elif isinstance(doc_dict, dict):
+            # Method 1: Try from doc_dict
+            if isinstance(doc_dict, dict):
                 references = doc_dict.get('references', [])
-                if not references and 'bibliography' in doc_dict:
+                if not references:
                     references = doc_dict.get('bibliography', [])
+                if not references and 'body' in doc_dict:
+                    body = doc_dict.get('body', {})
+                    if isinstance(body, dict):
+                        references = body.get('references', [])
+                        if not references:
+                            references = body.get('bibliography', [])
+            
+            # Method 2: Try direct access from document object
+            if not references and hasattr(doc, 'document'):
+                try:
+                    doc_obj = doc.document
+                    if hasattr(doc_obj, 'references'):
+                        refs = doc_obj.references
+                        if refs:
+                            references = refs if isinstance(refs, list) else [refs]
+                            logger.debug(f"Got references directly from doc.document.references: {len(references)}")
+                    elif hasattr(doc_obj, 'bibliography'):
+                        refs = doc_obj.bibliography
+                        if refs:
+                            references = refs if isinstance(refs, list) else [refs]
+                            logger.debug(f"Got references from doc.document.bibliography: {len(references)}")
+                except Exception as e:
+                    logger.debug(f"Direct reference access failed: {e}")
+            
+            # Ensure references are serializable
+            if references and not isinstance(references, list):
+                references = [references] if references else []
+            
+            if references:
+                references = [
+                    ref if isinstance(ref, dict) else {'text': str(ref), 'type': 'reference'}
+                    for ref in references
+                ]
+            
+            logger.info(f"Extracted {len(references)} references")
+            
         except Exception as e:
             logger.warning(f"Could not extract references: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+        
+        # Get PDF file size
+        pdf_file = Path(pdf_path)
+        pdf_size = pdf_file.stat().st_size if pdf_file.exists() else 0
         
         # Create parser metadata
         parser_metadata = {
             "parser_version": "docling",
             "parsing_timestamp": datetime.now(timezone.utc).isoformat(),
-            "pdf_size_bytes": len(pdf_bytes),
+            "pdf_path": str(pdf_path),
+            "pdf_size_bytes": pdf_size,
             "raw_text_length": len(raw_text) if raw_text else 0,
             "num_sections": len(sections) if sections else 0,
             "num_references": len(references) if references else 0,
@@ -362,14 +542,6 @@ def parse_pdf_with_docling(pdf_bytes: bytes) -> Tuple[Optional[str], Optional[Di
         import traceback
         logger.error(traceback.format_exc())
         return None, None, None, None
-    finally:
-        # Clean up temporary file
-        if temp_file_path and Path(temp_file_path).exists():
-            try:
-                Path(temp_file_path).unlink()
-                logger.debug(f"Cleaned up temporary file: {temp_file_path}")
-            except Exception as e:
-                logger.warning(f"Failed to delete temporary file {temp_file_path}: {e}")
 
 
 @task(name="store_paper_in_db")
@@ -408,6 +580,11 @@ def store_paper_in_db(
         sections_json = json.dumps(sections) if sections else None
         references_json = json.dumps(references) if references else None
         parser_metadata_json = json.dumps(parser_metadata) if parser_metadata else None
+        
+        # Sanitize text fields before storing
+        sanitized_title = sanitize_text(paper.title)
+        sanitized_summary = sanitize_text(paper.summary)
+        sanitized_raw_text = sanitize_text(raw_text)
         
         date_processed = datetime.now(timezone.utc) if pdf_processed else None
         
@@ -449,9 +626,9 @@ def store_paper_in_db(
         cur.execute(upsert_sql, (
             paper_id,
             paper.entry_id,
-            paper.title,
+            sanitized_title,
             authors_json,
-            paper.summary,
+            sanitized_summary,
             paper.published,
             paper.updated,
             categories_json,
@@ -459,7 +636,7 @@ def store_paper_in_db(
             paper.pdf_url,
             paper.doi if hasattr(paper, "doi") else None,
             paper.journal_ref if hasattr(paper, "journal_ref") else None,
-            raw_text,
+            sanitized_raw_text,
             sections_json,
             references_json,
             "docling" if pdf_processed else None,
@@ -559,16 +736,26 @@ def arxiv_ai_paper_ingestion_flow(
                     
                     logger.info(f"Processing paper: {paper_id} - {paper.title[:60]}...")
                     
-                    # Download PDF temporarily
-                    pdf_bytes = download_pdf_temp(paper)
-                    if not pdf_bytes:
+                    # Download PDF to storage folder
+                    pdf_path = download_pdf(paper)
+                    if not pdf_path:
                         logger.warning(f"Failed to download PDF for {paper_id}, storing metadata only")
                         # Store paper with metadata only (pdf_processed=False)
                         store_paper_in_db(paper, None, None, None, None, False)
                         continue
                     
                     # Parse PDF with docling
-                    raw_text, sections, references, parser_metadata = parse_pdf_with_docling(pdf_bytes)
+                    raw_text, sections, references, parser_metadata = parse_pdf_with_docling(pdf_path)
+                    
+                    # Optionally clean up PDF file after parsing if configured
+                    if not config.KEEP_PDFS:
+                        try:
+                            pdf_file = Path(pdf_path)
+                            if pdf_file.exists():
+                                pdf_file.unlink()
+                                logger.debug(f"Deleted PDF file: {pdf_path}")
+                        except Exception as e:
+                            logger.warning(f"Failed to delete PDF file {pdf_path}: {e}")
                     
                     # Determine if PDF was successfully processed
                     pdf_processed = raw_text is not None

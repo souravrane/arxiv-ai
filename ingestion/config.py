@@ -53,7 +53,11 @@ class Config:
     
     # Chunking Configuration
     CHUNK_SIZE_TOKENS: int = int(os.getenv("CHUNK_SIZE_TOKENS", "650"))  # Target: 500-800 tokens
-    CHUNK_OVERLAP_TOKENS: int = int(os.getenv("CHUNK_OVERLAP_TOKENS", "125"))  # Target: 100-150 tokens
+    CHUNK_OVERLAP_TOKENS: int = int(os.getenv("CHUNK_OVERLAP_TOKENS", "125"))
+    
+    # PDF Storage Configuration
+    PDF_STORAGE_DIR: str = os.getenv("PDF_STORAGE_DIR", "pdfs")  # Directory to store downloaded PDFs
+    KEEP_PDFS: bool = os.getenv("KEEP_PDFS", "true").lower() == "true"  # Whether to keep PDFs after parsing  # Target: 100-150 tokens
     
     # Database Schema SQL (MySQL compatible)
     CREATE_TABLE_SQL: str = """

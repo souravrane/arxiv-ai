@@ -37,7 +37,7 @@ class QdrantService:
     def search(
         self,
         query_vector: List[float],
-        top_k: int = 10,
+        top_k: Optional[int] = None,
         filter_conditions: Optional[dict] = None,
     ) -> List[dict]:
         """
@@ -77,11 +77,14 @@ class QdrantService:
                 if conditions:
                     qdrant_filter = Filter(must=conditions)
 
+            # Use top_k or a reasonable default
+            limit = top_k if top_k else 10
+
             # The main semantic search call: searches by vector similarity.
             results = self.client.query_points(
                 collection_name=self.collection_name,
                 query=query_vector,
-                limit=top_k,
+                limit=limit,
                 query_filter=qdrant_filter,
                 with_payload=True,
                 with_vectors=False,
@@ -98,7 +101,13 @@ class QdrantService:
                     "vector": getattr(point, 'vector', None),
                 })
 
-            logger.debug(f"Vector semantic search found {len(formatted_results)} results for query")
+            # Limit results to top_k if specified
+            if top_k is not None:
+                formatted_results = formatted_results[:top_k]
+
+            logger.debug(
+                f"Vector semantic search found {len(formatted_results)} results (top_k: {top_k})"
+            )
             return formatted_results
 
         except Exception as e:
